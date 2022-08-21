@@ -27,6 +27,7 @@ from ryu.lib.packet import ipv4
 from ryu.lib.packet import tcp
 from ryu.lib.packet import udp
 import random
+import time
 
 class SimpleSwitch13(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -34,8 +35,8 @@ class SimpleSwitch13(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(SimpleSwitch13, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
-        self.IP_to_mac = {}
-        self.ip_address={}
+        self.ip_to_mac = {}
+        self.ip_list={}
         self.datapaths=[]
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -79,7 +80,7 @@ class SimpleSwitch13(app_manager.RyuApp):
             parser = datapath.ofproto_parser
             
             if len(actions)!=0:
-                out_mac = self.IP_to_mac[dst]
+                out_mac = self.ip_to_mac[dst]
             
                 if out_mac in self.mac_to_port[datapath.id]:
                     out_port = self.mac_to_port[datapath.id][out_mac]
@@ -151,29 +152,29 @@ class SimpleSwitch13(app_manager.RyuApp):
                 pkt_ipv4 = pkt.get_protocol(ipv4.ipv4)
                 dst_ip=pkt_ipv4.dst
                 src_ip=pkt_ipv4.src 
-                if dst_ip not in self.IP_to_mac:
-                    self.IP_to_mac[dst_ip]=dst
-                if src_ip not in self.IP_to_mac:
-                    self.IP_to_mac[src_ip]=src
-                add_new_flow=False 
+                if dst_ip not in self.ip_to_mac:
+                    self.ip_to_mac[dst_ip]=dst
+                if src_ip not in self.ip_to_mac:
+                    self.ip_to_mac[src_ip]=src
+                tcp_handler_return_value=False 
                 if pkt_ipv4.proto==6:  
                     pkt_tcp = pkt.get_protocol(tcp.tcp)
-                    add_new_flow=self._tcp_traffic_handler(datapath, in_port,eth, pkt_ipv4, pkt_tcp)
+                    tcp_handler_return_value=self._tcp_traffic_handler(datapath, in_port,eth, pkt_ipv4, pkt_tcp)
                     match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,ipv4_src=pkt_ipv4.src, ipv4_dst=pkt_ipv4.dst, ip_proto=pkt_ipv4.proto)
                     
-                    if add_new_flow==2:
+                    if tcp_handler_return_value==2:
                         # flow rule will be added for 15 seconds
-                        idle=15  
-                        hard=15
+                        idle=60  
+                        hard=60
                         drop_current_packet=True
                         
-                    elif add_new_flow==3:
+                    elif tcp_handler_return_value==3:
                         # Drop action for the malicous IP for all type of traffic
                         actions=[]
                         drop_current_packet=True
                         match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,ipv4_src=pkt_ipv4.src) 
                         
-                    elif add_new_flow==4:
+                    elif tcp_handler_return_value==4:
                         # Do nothing 
                         return
                     else:
@@ -192,7 +193,7 @@ class SimpleSwitch13(app_manager.RyuApp):
                     match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
             # verify if we have a valid buffer_id, if yes avoid to send both
             # flow_mod & packet_out
-                if add_new_flow==2 or add_new_flow==3:
+                if tcp_handler_return_value==2 or tcp_handler_return_value==3:
                     #If IP is verified then add flows on all connected switches to avoid varify again
                     self.add_flows(self.datapaths, 100, match, actions,idle,hard,pkt_ipv4.dst)
                 else:
@@ -200,7 +201,7 @@ class SimpleSwitch13(app_manager.RyuApp):
                         self.add_flow(datapath, 100, match, actions,idle,hard, msg.buffer_id)
                         return
                     else:
-                        self.add_flow(datapath, 1, match, actions,idle,hard)
+                        self.add_flow(datapath, 100, match, actions,idle,hard)
                 
           
         data = None
@@ -218,32 +219,43 @@ class SimpleSwitch13(app_manager.RyuApp):
         s_port= pkt_tcp.src_port
         d_port= pkt_tcp.dst_port
         # SYN packet:
-        pkt = packet.Packet()
-        pkt.add_protocol(ethernet.ethernet(ethertype=pkt_ethernet.ethertype,dst=pkt_ethernet.src,src=pkt_ethernet.dst))
-        pkt.add_protocol(ipv4.ipv4(dst=pkt_ipv4.src,src=pkt_ipv4.dst,proto=pkt_ipv4.proto))
         
-        # Generate random sequence number
-        s_seq_no=random.randrange(120000000,999999999)
-        r_seq_no=pkt_tcp.seq
-        s_ack_no=r_seq_no+1
+        
+        
+        timestamp=int(time.time())
+        remove_ip=[]
+        for i in self.ip_list:
+            if(timestamp-self.ip_list[i][3]>60):
+                remove_ip.append(i)
+        for i in remove_ip:
+            self.ip_list.pop(i) 
+        
         
         # SYN packet:
         if(pkt_tcp.bits==2):
-            print("inside syn first syn")
-            print("ip list : ",self.ip_address)
-            if(pkt_ipv4.src in self.ip_address and self.ip_address[pkt_ipv4.src][2]=="IN_PROCESS"):
+            if(pkt_ipv4.src in self.ip_list and self.ip_list[pkt_ipv4.src][2]=="IN_PROCESS"):
                 return 3
             else:
-                self.ip_address[pkt_ipv4.src]=[s_seq_no,pkt_tcp.seq+1,"IN_PROCESS"]
+                # Generate random sequence number
+                s_seq_no=random.randrange(120000000,999999999)
+                r_seq_no=pkt_tcp.seq
+                s_ack_no=r_seq_no+1
+                pkt = packet.Packet()
+                pkt.add_protocol(ethernet.ethernet(ethertype=pkt_ethernet.ethertype,dst=pkt_ethernet.src,src=pkt_ethernet.dst))
+                pkt.add_protocol(ipv4.ipv4(dst=pkt_ipv4.src,src=pkt_ipv4.dst,proto=pkt_ipv4.proto))
+                self.ip_list[pkt_ipv4.src]=[s_seq_no,pkt_tcp.seq+1,"IN_PROCESS",timestamp]
                 pkt.add_protocol(tcp.tcp(src_port=d_port,dst_port=s_port,seq=s_seq_no,ack=s_ack_no, bits=18))
                 self._send_packet(datapath, in_port, pkt)
                 return 4
         # ACK packet:
         elif(pkt_tcp.bits==16):
-            if(pkt_ipv4.src in self.ip_address):
-                temp_list=self.ip_address[pkt_ipv4.src]
+            if(pkt_ipv4.src in self.ip_list):
+                temp_list=self.ip_list[pkt_ipv4.src]
                 if(temp_list[2]=="IN_PROCESS" and temp_list[0]==pkt_tcp.ack-1 and temp_list[1]==pkt_tcp.seq):
-                    self.ip_address.pop(pkt_ipv4.src)
+                    self.ip_list.pop(pkt_ipv4.src)
+                    pkt = packet.Packet()
+                    pkt.add_protocol(ethernet.ethernet(ethertype=pkt_ethernet.ethertype,dst=pkt_ethernet.src,src=pkt_ethernet.dst))
+                    pkt.add_protocol(ipv4.ipv4(dst=pkt_ipv4.src,src=pkt_ipv4.dst,proto=pkt_ipv4.proto))
                     pkt.add_protocol(tcp.tcp(src_port=d_port,dst_port=s_port,seq=pkt_tcp.ack,ack=0, bits=4))
                     self._send_packet(datapath, in_port, pkt)
                     return 2

@@ -34,8 +34,8 @@ class SimpleSwitch13(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(SimpleSwitch13, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
-        self.IP_to_mac = {}
-        self.ip_address={}
+        self.ip_to_mac = {}
+        self.ip_list={}
         self.datapaths=[]
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -77,7 +77,7 @@ class SimpleSwitch13(app_manager.RyuApp):
             parser = datapath.ofproto_parser
             
             if len(actions)!=0:
-                out_mac = self.IP_to_mac[dst]
+                out_mac = self.ip_to_mac[dst]
             
                 if out_mac in self.mac_to_port[datapath.id]:
                     out_port = self.mac_to_port[datapath.id][out_mac]
@@ -143,32 +143,32 @@ class SimpleSwitch13(app_manager.RyuApp):
         idle=0
         hard=0
         # install a flow to avoid packet_in next time
-        add_new_flow=0
+        tcp_handler_return_value=0
         if out_port != ofproto.OFPP_FLOOD:
             if eth.ethertype == ether_types.ETH_TYPE_IP:
                 pkt_ipv4 = pkt.get_protocol(ipv4.ipv4)
                 dst_ip=pkt_ipv4.dst
                 src_ip=pkt_ipv4.src 
-                if dst_ip not in self.IP_to_mac:
-                    self.IP_to_mac[dst_ip]=dst
-                if src_ip not in self.IP_to_mac:
-                    self.IP_to_mac[src_ip]=src 
+                if dst_ip not in self.ip_to_mac:
+                    self.ip_to_mac[dst_ip]=dst
+                if src_ip not in self.ip_to_mac:
+                    self.ip_to_mac[src_ip]=src 
                 if pkt_ipv4.proto==6:  
                     pkt_tcp = pkt.get_protocol(tcp.tcp)
-                    add_new_flow=self._tcp_traffic_handler(datapath,pkt_ipv4, pkt_tcp)
+                    tcp_handler_return_value=self._tcp_traffic_handler(pkt_ipv4, pkt_tcp)
                     match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,ipv4_src=pkt_ipv4.src, ipv4_dst=pkt_ipv4.dst, ip_proto=pkt_ipv4.proto)
                     
-                    if add_new_flow==2:
+                    if tcp_handler_return_value==2:
                         actions=[]
                         drop_current_packet=True
                         match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,ipv4_src=pkt_ipv4.src)
                         idle=60  
                         hard=60
-                    elif add_new_flow==3:
+                    elif tcp_handler_return_value==3:
                         return
-                    elif add_new_flow==4:
+                    elif tcp_handler_return_value==4:
                         pass
-                    elif add_new_flow==1:
+                    elif tcp_handler_return_value==1:
                         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,ofproto.OFPCML_NO_BUFFER)]
                         match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,ipv4_src=pkt_ipv4.src, ipv4_dst=pkt_ipv4.dst, ip_proto=pkt_ipv4.proto, tcp_flags=2)
                     else:
@@ -185,13 +185,13 @@ class SimpleSwitch13(app_manager.RyuApp):
                     match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
             # verify if we have a valid buffer_id, if yes avoid to send both
             # flow_mod & packet_out
-                if add_new_flow==2 or add_new_flow==1:
-                    if add_new_flow==2:
+                if tcp_handler_return_value==2 or tcp_handler_return_value==1:
+                    if tcp_handler_return_value==2:
                         priority=1111
                     else:
                         priority=1000
                     self.add_flow(datapath, priority, match, actions,idle,hard)
-                elif add_new_flow==4:
+                elif tcp_handler_return_value==4:
                     pass
                 else:
                     
@@ -207,7 +207,7 @@ class SimpleSwitch13(app_manager.RyuApp):
             data = msg.data
         if drop_current_packet:
             actions=[]
-        if add_new_flow==1 or add_new_flow==4:
+        if tcp_handler_return_value==1 or tcp_handler_return_value==4:
             actions = [parser.OFPActionOutput(out_port)]
         # what to do with current packet
         out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,in_port=in_port, actions=actions, data=data)
@@ -216,42 +216,35 @@ class SimpleSwitch13(app_manager.RyuApp):
    # TCP traffic handle function
             
         
-    def _tcp_traffic_handler(self, datapath, pkt_ipv4, pkt_tcp):
-        s_port= pkt_tcp.src_port
-        d_port= pkt_tcp.dst_port
-        print("Inside TCP handler------------------->\n")
-        print("List : ",self.ip_address)
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+    def _tcp_traffic_handler(self, pkt_ipv4, pkt_tcp):
         allowed_packet=12
         # SYN packet:
         if(pkt_tcp.bits==2):
             # If its a first SYN packet from an IP
-            if(pkt_ipv4.src not in self.ip_address):
+            if(pkt_ipv4.src not in self.ip_list):
                 timestamp=int(time.time())
-                self.ip_address[pkt_ipv4.src]=[1,timestamp]
-                print("List is ----------------------->\n",self.ip_address)
+                self.ip_list[pkt_ipv4.src]=[1,timestamp]
                 return 3
             # If its a second packet from an IP    
-            elif(pkt_ipv4.src in self.ip_address and self.ip_address[pkt_ipv4.src][0]==1):
+            elif(pkt_ipv4.src in self.ip_list and self.ip_list[pkt_ipv4.src][0]==1):
                 
                 timestamp=int(time.time())
-                if(timestamp-self.ip_address[pkt_ipv4.src][1]>60):
-                    self.ip_address[pkt_ipv4.src]=[1,timestamp]
+                if(timestamp-self.ip_list[pkt_ipv4.src][1]>60):
+                    self.ip_list[pkt_ipv4.src]=[1,timestamp]
                 else:
-                    self.ip_address[pkt_ipv4.src][0]=self.ip_address[pkt_ipv4.src][0]+1
+                    self.ip_list[pkt_ipv4.src][0]=self.ip_list[pkt_ipv4.src][0]+1
                 return 1
             # If SYN packet number is more than allowed packets
-            elif(pkt_ipv4.src in self.ip_address and self.ip_address[pkt_ipv4.src][0]>=allowed_packet):
-                self.ip_address.pop(pkt_ipv4.src)
+            elif(pkt_ipv4.src in self.ip_list and self.ip_list[pkt_ipv4.src][0]>=allowed_packet):
+                self.ip_list.pop(pkt_ipv4.src)
                 return 2
                 
             else:
                 timestamp=int(time.time())
-                if(timestamp-self.ip_address[pkt_ipv4.src][1]>60):
-                    self.ip_address[pkt_ipv4.src]=[1,timestamp]
+                if(timestamp-self.ip_list[pkt_ipv4.src][1]>60):
+                    self.ip_list[pkt_ipv4.src]=[1,timestamp]
                 else:
-                    self.ip_address[pkt_ipv4.src][0]=self.ip_address[pkt_ipv4.src][0]+1
+                    self.ip_list[pkt_ipv4.src][0]=self.ip_list[pkt_ipv4.src][0]+1
                 return 4
         else:
             return 5           
